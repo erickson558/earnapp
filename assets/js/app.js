@@ -11,31 +11,45 @@
   var saveBtn = document.getElementById('saveBtn');
   var clearStateBtn = document.getElementById('clearStateBtn');
   var loadStateBtn = document.getElementById('loadStateBtn');
+  var openCurrentBtn = document.getElementById('openCurrentBtn');
+  var openSigninBtn = document.getElementById('openSigninBtn');
   var statusText = document.getElementById('statusText');
   var persistText = document.getElementById('persistText');
   var pendingCount = document.getElementById('pendingCount');
   var removedCount = document.getElementById('removedCount');
   var currentUrlText = document.getElementById('currentUrlText');
+  var currentUrlFull = document.getElementById('currentUrlFull');
   var pendingList = document.getElementById('pendingList');
   var logList = document.getElementById('logList');
-  var previewFrame = document.getElementById('previewFrame');
 
-  if (!urlsInput || !keywordsInput) {
+  if (
+    !urlsInput ||
+    !keywordsInput ||
+    !delayInput ||
+    !startBtn ||
+    !stopBtn ||
+    !statusText ||
+    !pendingList ||
+    !logList
+  ) {
     return;
   }
 
   var state = {
     running: false,
+    busyStart: false,
+    busyStop: false,
     pending: [],
     keywords: [],
     currentIndex: 0,
+    currentUrl: '',
     removed: 0,
-    timer: null,
-    controller: null,
-    urlsEdited: false,
-    keywordsEdited: false,
+    message: 'idle',
+    logs: [],
+    pollTimer: null,
     saveTimer: null,
-    lastSavedAt: ''
+    lastSavedAt: '',
+    hadStatusError: false
   };
 
   function normalizeUrls(rawText) {
@@ -61,7 +75,7 @@
           out.push(url);
         }
       } catch (error) {
-        // Ignora lineas invalidas.
+        // ignore invalid URL
       }
     }
 
@@ -107,6 +121,14 @@
     return normalizeKeywords(raw);
   }
 
+  function parseIntSafe(value, fallback) {
+    var parsed = parseInt(value, 10);
+    if (!isFinite(parsed)) {
+      return fallback;
+    }
+    return parsed;
+  }
+
   function shortUrl(url) {
     if (!url) {
       return '-';
@@ -114,60 +136,17 @@
     return url.length > 45 ? url.slice(0, 42) + '...' : url;
   }
 
-  function renderPending() {
-    pendingList.innerHTML = '';
-
-    var i;
-    for (i = 0; i < state.pending.length; i += 1) {
-      var li = document.createElement('li');
-      li.textContent = state.pending[i];
-      if (state.running && i === state.currentIndex) {
-        li.className = 'active';
-      }
-      pendingList.appendChild(li);
+  function clampCurrentIndex() {
+    if (!state.pending.length) {
+      state.currentIndex = 0;
+      return;
+    }
+    if (state.currentIndex < 0 || state.currentIndex >= state.pending.length) {
+      state.currentIndex = 0;
     }
   }
 
-  function updateCounters() {
-    pendingCount.textContent = String(state.pending.length);
-    removedCount.textContent = String(state.removed);
-
-    var current = state.pending[state.currentIndex] || '-';
-    currentUrlText.textContent = shortUrl(current);
-  }
-
-  function log(message, level) {
-    var li = document.createElement('li');
-    li.className = level || 'note';
-    var stamp = new Date().toLocaleTimeString();
-    li.textContent = '[' + stamp + '] ' + message;
-    logList.insertBefore(li, logList.firstChild);
-  }
-
-  function setStatus(text, modeClass) {
-    statusText.textContent = text;
-    statusText.className = modeClass;
-  }
-
-  function setPersistText(text, modeClass) {
-    persistText.textContent = text;
-    persistText.className = modeClass;
-  }
-
-  function setControls(running) {
-    startBtn.disabled = running;
-    stopBtn.disabled = !running;
-  }
-
-  function getDelay() {
-    var value = parseInt(delayInput.value, 10);
-    if (!isFinite(value) || value < 1000) {
-      return 3500;
-    }
-    return value;
-  }
-
-  function syncTextarea() {
+  function syncUrlTextarea() {
     urlsInput.value = state.pending.join('\n');
   }
 
@@ -175,47 +154,130 @@
     keywordsInput.value = state.keywords.join('\n');
   }
 
-  function loadFrame(url) {
-    var frameUrl = 'scan.php?action=frame&url=' + encodeURIComponent(url);
-    previewFrame.src = frameUrl;
+  function renderPending() {
+    pendingList.innerHTML = '';
+    var activeUrl = getCurrentUrl();
+
+    var i;
+    for (i = 0; i < state.pending.length; i += 1) {
+      var li = document.createElement('li');
+      li.textContent = state.pending[i];
+      if (activeUrl && state.pending[i] === activeUrl) {
+        li.className = 'active';
+      }
+      pendingList.appendChild(li);
+    }
   }
 
-  function clampCurrentIndex() {
-    if (state.pending.length === 0) {
-      state.currentIndex = 0;
-      return;
-    }
-    if (state.currentIndex >= state.pending.length || state.currentIndex < 0) {
-      state.currentIndex = 0;
+  function renderLogs() {
+    logList.innerHTML = '';
+    var logs = Array.isArray(state.logs) ? state.logs : [];
+    var i;
+    for (i = 0; i < logs.length; i += 1) {
+      var item = logs[i] || {};
+      var li = document.createElement('li');
+      li.className = item.level || 'note';
+
+      var stamp = '';
+      if (item.time) {
+        var date = new Date(item.time);
+        if (!isNaN(date.getTime())) {
+          stamp = '[' + date.toLocaleTimeString() + '] ';
+        }
+      }
+
+      li.textContent = stamp + String(item.message || '');
+      logList.appendChild(li);
     }
   }
 
-  function applyManualChanges() {
-    var changed = false;
-
-    if (state.urlsEdited) {
-      state.pending = normalizeUrls(urlsInput.value);
-      clampCurrentIndex();
-      state.urlsEdited = false;
-      changed = true;
+  function pushClientLog(message, level) {
+    state.logs.unshift({
+      time: new Date().toISOString(),
+      level: level || 'note',
+      message: String(message || '')
+    });
+    if (state.logs.length > 300) {
+      state.logs = state.logs.slice(0, 300);
     }
+    renderLogs();
+  }
 
-    if (state.keywordsEdited) {
-      state.keywords = normalizeKeywords(keywordsInput.value);
-      state.keywordsEdited = false;
-      changed = true;
+  function getCurrentUrl() {
+    if (state.currentUrl) {
+      return state.currentUrl;
     }
+    if (!state.pending.length) {
+      return '';
+    }
+    clampCurrentIndex();
+    return state.pending[state.currentIndex] || '';
+  }
 
-    if (!changed) {
+  function updateCounters() {
+    pendingCount.textContent = String(state.pending.length);
+    removedCount.textContent = String(state.removed);
+
+    var current = getCurrentUrl();
+    currentUrlText.textContent = shortUrl(current || '-');
+    if (currentUrlFull) {
+      currentUrlFull.value = current || '-';
+    }
+  }
+
+  function setStatus(label, modeClass) {
+    statusText.textContent = label;
+    statusText.className = modeClass;
+  }
+
+  function setPersistText(label, modeClass) {
+    if (!persistText) {
+      return;
+    }
+    persistText.textContent = label;
+    persistText.className = modeClass;
+  }
+
+  function setStatusFromState() {
+    if (state.running) {
+      setStatus('Escaneando', 'status-run');
       return;
     }
 
-    syncTextarea();
-    syncKeywordsTextarea();
-    renderPending();
-    updateCounters();
-    queueSave('manual-change');
-    log('Cambios manuales aplicados.', 'note');
+    var msg = String(state.message || '').toLowerCase();
+    if (msg.indexOf('fallo') !== -1 || msg.indexOf('error') !== -1) {
+      setStatus('Error', 'status-stop');
+      return;
+    }
+    if (msg.indexOf('completado') !== -1) {
+      setStatus('Completado', 'status-idle');
+      return;
+    }
+    setStatus('Detenido', 'status-idle');
+  }
+
+  function setControls() {
+    var running = !!state.running;
+    var startBusy = !!state.busyStart;
+    var stopBusy = !!state.busyStop;
+
+    startBtn.disabled = running || startBusy;
+    stopBtn.disabled = !running || stopBusy;
+
+    urlsInput.disabled = running;
+    keywordsInput.disabled = running;
+    delayInput.disabled = running;
+  }
+
+  function getDelay() {
+    var value = parseIntSafe(delayInput.value, 12000);
+    if (value < 1000) {
+      return 1000;
+    }
+    if (value > 300000) {
+      return 300000;
+    }
+    return value;
   }
 
   function buildPersistPayload(reason) {
@@ -297,6 +359,9 @@
   }
 
   function queueSave(reason) {
+    if (state.running) {
+      return;
+    }
     if (state.saveTimer !== null) {
       clearTimeout(state.saveTimer);
     }
@@ -315,17 +380,19 @@
         },
         body: JSON.stringify({
           action: 'clear'
-        })
+        }),
+        cache: 'no-store'
       });
       var data = await response.json();
       if (!response.ok || !data.ok) {
         markPersistErr('Persistencia: no se pudo limpiar');
-        return;
+        return false;
       }
       markPersistWarn('Persistencia: limpia');
-      log('Estado persistente del servidor limpio.', 'note');
+      return true;
     } catch (error) {
       markPersistErr('Persistencia: error al limpiar');
+      return false;
     }
   }
 
@@ -335,36 +402,27 @@
 
     if (pending.length > 0) {
       state.pending = pending;
-      urlsInput.value = pending.join('\n');
-    } else {
-      state.pending = normalizeUrls(urlsInput.value);
-      syncTextarea();
     }
 
     if (keywords.length > 0) {
       state.keywords = keywords;
-      keywordsInput.value = keywords.join('\n');
-    } else {
-      state.keywords = normalizeKeywords(keywordsInput.value);
-      syncKeywordsTextarea();
     }
 
-    var savedDelay = parseInt(remoteState.delay_ms, 10);
-    if (isFinite(savedDelay) && savedDelay >= 1000) {
+    var savedDelay = parseIntSafe(remoteState.delay_ms, getDelay());
+    if (savedDelay >= 1000) {
       delayInput.value = String(savedDelay);
     }
 
-    var savedRemoved = parseInt(remoteState.removed_count, 10);
-    if (isFinite(savedRemoved) && savedRemoved >= 0) {
+    var savedRemoved = parseIntSafe(remoteState.removed_count, 0);
+    if (savedRemoved >= 0) {
       state.removed = savedRemoved;
     }
 
-    var savedIndex = parseInt(remoteState.current_index, 10);
-    if (isFinite(savedIndex) && savedIndex >= 0) {
-      state.currentIndex = savedIndex;
-    }
+    state.currentIndex = parseIntSafe(remoteState.current_index, 0);
     clampCurrentIndex();
 
+    syncUrlTextarea();
+    syncKeywordsTextarea();
     renderPending();
     updateCounters();
   }
@@ -390,7 +448,7 @@
       }
 
       if (showLog) {
-        log('Estado cargado desde servidor.', 'note');
+        pushClientLog('Estado cargado desde servidor.', 'note');
       }
 
       return true;
@@ -400,96 +458,164 @@
     }
   }
 
-  async function scanCycle() {
-    if (!state.running) {
+  function normalizeRemoteLogs(logs) {
+    if (!Array.isArray(logs)) {
+      return [];
+    }
+    var out = [];
+    var i;
+    for (i = 0; i < logs.length; i += 1) {
+      var item = logs[i] || {};
+      out.push({
+        time: String(item.time || ''),
+        level: String(item.level || 'note'),
+        message: String(item.message || '')
+      });
+      if (out.length >= 300) {
+        break;
+      }
+    }
+    return out;
+  }
+
+  function applyAutomationState(remoteState, options) {
+    var opts = options || {};
+    if (!remoteState || typeof remoteState !== 'object') {
       return;
     }
 
-    applyManualChanges();
+    if (Array.isArray(remoteState.pending_urls)) {
+      state.pending = parseAnyUrls(remoteState.pending_urls);
+    }
 
-    if (state.pending.length === 0) {
-      log('No quedan URLs pendientes.', 'note');
-      stopScan(false);
-      return;
+    if (Array.isArray(remoteState.keywords) && remoteState.keywords.length > 0) {
+      state.keywords = parseAnyKeywords(remoteState.keywords);
+    }
+
+    state.running = !!remoteState.running;
+    state.currentIndex = parseIntSafe(remoteState.current_index, 0);
+    state.currentUrl = String(remoteState.current_url || '');
+    state.removed = Math.max(parseIntSafe(remoteState.removed_count, state.removed), 0);
+    state.message = String(remoteState.message || state.message || '');
+
+    if (Array.isArray(remoteState.logs)) {
+      state.logs = normalizeRemoteLogs(remoteState.logs);
     }
 
     clampCurrentIndex();
-    var url = state.pending[state.currentIndex];
 
-    loadFrame(url);
-    updateCounters();
+    if (!opts.skipSyncInputs) {
+      syncUrlTextarea();
+      syncKeywordsTextarea();
+    }
+
     renderPending();
+    renderLogs();
+    updateCounters();
+    setStatusFromState();
+    setControls();
 
-    var advance = true;
-
-    try {
-      state.controller = new AbortController();
-      var response = await fetch('scan.php', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          url: url,
-          keywords: state.keywords
-        }),
-        signal: state.controller.signal
-      });
-
-      var data = await response.json();
-
-      if (!response.ok || !data.ok) {
-        var detail = data && data.error ? data.error : 'Error al escanear';
-        log('Error en ' + shortUrl(url) + ': ' + detail, 'err');
-      } else if (data.matched) {
-        state.pending.splice(state.currentIndex, 1);
-        state.removed += 1;
-        syncTextarea();
-        log('Eliminada ' + shortUrl(url) + ' por "' + data.keyword + '".', 'ok');
-        advance = false;
-      } else {
-        log('Sin coincidencia en ' + shortUrl(url) + ' (HTTP ' + data.http_code + ').', 'warn');
-      }
-    } catch (error) {
-      if (error && error.name === 'AbortError') {
-        return;
-      }
-      log('Fallo de red en ' + shortUrl(url) + '.', 'err');
-    } finally {
-      state.controller = null;
-      clampCurrentIndex();
-      updateCounters();
-      renderPending();
+    if (remoteState.updated_at) {
+      markPersistOk(remoteState.updated_at);
     }
-
-    if (!state.running) {
-      return;
-    }
-
-    if (state.pending.length === 0) {
-      queueSave('completed');
-      log('Escaneo completo. Todas las URLs se eliminaron.', 'ok');
-      stopScan(false);
-      return;
-    }
-
-    if (advance) {
-      state.currentIndex = (state.currentIndex + 1) % state.pending.length;
-    }
-
-    queueSave('scan-step');
-    state.timer = setTimeout(scanCycle, getDelay());
   }
 
-  function startScan() {
-    if (state.running) {
+  async function automationApi(action, payload) {
+    var body = payload || {};
+    body.action = action;
+
+    var response = await fetch('automation.php', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body),
+      cache: 'no-store'
+    });
+
+    var data = null;
+    try {
+      data = await response.json();
+    } catch (error) {
+      data = {};
+    }
+
+    return {
+      ok: response.ok && data && data.ok,
+      status: response.status,
+      data: data || {}
+    };
+  }
+
+  async function fetchAutomationStatus() {
+    var response = await fetch('automation.php?action=status&ts=' + encodeURIComponent(String(Date.now())), {
+      cache: 'no-store'
+    });
+    var data = null;
+    try {
+      data = await response.json();
+    } catch (error) {
+      data = {};
+    }
+    return {
+      ok: response.ok && data && data.ok,
+      status: response.status,
+      data: data || {}
+    };
+  }
+
+  function scheduleStatusPoll(ms) {
+    if (state.pollTimer !== null) {
+      clearTimeout(state.pollTimer);
+    }
+    state.pollTimer = setTimeout(function () {
+      state.pollTimer = null;
+      pollAutomationStatus();
+    }, ms);
+  }
+
+  async function pollAutomationStatus() {
+    try {
+      var result = await fetchAutomationStatus();
+      if (!result.ok || !result.data || !result.data.state) {
+        if (!state.hadStatusError) {
+          pushClientLog('No se pudo consultar estado de automatizacion.', 'err');
+          state.hadStatusError = true;
+        }
+        scheduleStatusPoll(state.running ? 2500 : 5000);
+        return;
+      }
+
+      state.hadStatusError = false;
+      applyAutomationState(result.data.state);
+      scheduleStatusPoll(state.running ? 2000 : 5000);
+    } catch (error) {
+      if (!state.hadStatusError) {
+        pushClientLog('Fallo de red al consultar estado.', 'err');
+        state.hadStatusError = true;
+      }
+      scheduleStatusPoll(state.running ? 2500 : 5000);
+    }
+  }
+
+  function openUrlTopLevel(url) {
+    if (!url) {
+      return;
+    }
+    var popup = window.open(url, '_blank', 'noopener,noreferrer');
+    if (!popup) {
+      alert('El navegador bloqueo la ventana. Permite popups para este sitio.');
+    }
+  }
+
+  async function startAutomation() {
+    if (state.running || state.busyStart) {
       return;
     }
 
     state.pending = normalizeUrls(urlsInput.value);
     state.keywords = normalizeKeywords(keywordsInput.value);
-    state.urlsEdited = false;
-    state.keywordsEdited = false;
+    state.currentIndex = 0;
     clampCurrentIndex();
 
     if (state.pending.length === 0) {
@@ -502,105 +628,158 @@
       return;
     }
 
-    syncTextarea();
-    syncKeywordsTextarea();
-    renderPending();
-    updateCounters();
+    state.busyStart = true;
+    setStatus('Iniciando', 'status-run');
+    setControls();
 
-    state.running = true;
-    setControls(true);
-    setStatus('Escaneando', 'status-run');
-    log('Escaneo iniciado. URLs: ' + state.pending.length + '. Palabras: ' + state.keywords.length + '.', 'note');
-    queueSave('scan-start');
-    scanCycle();
+    try {
+      var result = await automationApi('start', {
+        urls: state.pending,
+        keywords: state.keywords,
+        delay_ms: getDelay(),
+        page_wait_ms: 8000,
+        headless: true
+      });
+
+      if (!result.ok || !result.data || !result.data.state) {
+        var errorText = result.data && result.data.error ? result.data.error : 'No se pudo iniciar';
+        pushClientLog('Inicio fallido: ' + errorText, 'err');
+        alert('No se pudo iniciar: ' + errorText);
+        setStatus('Detenido', 'status-stop');
+        return;
+      }
+
+      applyAutomationState(result.data.state);
+      pushClientLog('Automatizacion iniciada.', 'note');
+      scheduleStatusPoll(900);
+    } catch (error) {
+      pushClientLog('Fallo de red al iniciar.', 'err');
+      alert('Fallo de red al iniciar automatizacion.');
+      setStatus('Detenido', 'status-stop');
+    } finally {
+      state.busyStart = false;
+      setControls();
+    }
   }
 
-  function stopScan(manualStop) {
-    var wasRunning = state.running;
-    state.running = false;
-
-    if (state.timer !== null) {
-      clearTimeout(state.timer);
-      state.timer = null;
+  async function stopAutomation() {
+    if (!state.running || state.busyStop) {
+      return;
     }
 
-    if (state.controller) {
-      state.controller.abort();
-      state.controller = null;
-    }
+    state.busyStop = true;
+    setStatus('Deteniendo', 'status-stop');
+    setControls();
 
-    setControls(false);
-    setStatus('Detenido', wasRunning ? 'status-stop' : 'status-idle');
-    renderPending();
-    updateCounters();
-    queueSave(manualStop ? 'scan-stop-manual' : 'scan-stop-auto');
-
-    if (manualStop && wasRunning) {
-      log('Escaneo finalizado por usuario.', 'note');
+    try {
+      var result = await automationApi('stop', {});
+      if (!result.ok) {
+        var detail = result.data && result.data.error ? result.data.error : 'No se pudo detener';
+        pushClientLog('Detencion fallida: ' + detail, 'err');
+        alert('No se pudo detener: ' + detail);
+      } else if (result.data && result.data.state) {
+        applyAutomationState(result.data.state);
+        pushClientLog('Detencion solicitada.', 'warn');
+      }
+      scheduleStatusPoll(800);
+    } catch (error) {
+      pushClientLog('Fallo de red al detener.', 'err');
+      scheduleStatusPoll(1200);
+    } finally {
+      state.busyStop = false;
+      setControls();
     }
   }
 
   function bindEvents() {
     urlsInput.addEventListener('input', function () {
       if (state.running) {
-        state.urlsEdited = true;
-        markPersistWarn('Persistencia: cambios en cola pendientes');
         return;
       }
       state.pending = normalizeUrls(urlsInput.value);
       clampCurrentIndex();
-      syncTextarea();
+      syncUrlTextarea();
       renderPending();
       updateCounters();
+      markPersistWarn('Persistencia: cambios pendientes');
       queueSave('edit-urls');
     });
 
     keywordsInput.addEventListener('input', function () {
       if (state.running) {
-        state.keywordsEdited = true;
-        markPersistWarn('Persistencia: cambios en palabras pendientes');
         return;
       }
       state.keywords = normalizeKeywords(keywordsInput.value);
       syncKeywordsTextarea();
+      markPersistWarn('Persistencia: cambios pendientes');
       queueSave('edit-keywords');
     });
 
     delayInput.addEventListener('input', function () {
+      if (state.running) {
+        return;
+      }
       markPersistWarn('Persistencia: ajustes pendientes');
       queueSave('edit-delay');
     });
 
     startBtn.addEventListener('click', function () {
-      startScan();
+      startAutomation();
     });
 
     stopBtn.addEventListener('click', function () {
-      stopScan(true);
+      stopAutomation();
     });
 
     saveBtn.addEventListener('click', function () {
       persistState('manual-save').then(function (ok) {
         if (ok) {
-          log('Estado guardado en servidor.', 'note');
+          pushClientLog('Estado guardado en servidor.', 'note');
         }
       });
     });
 
     clearStateBtn.addEventListener('click', function () {
-      var confirmed = window.confirm('Esto limpia el estado guardado del servidor. Continuar?');
+      var confirmed = window.confirm('Esto limpia el estado guardado. Continuar?');
       if (!confirmed) {
         return;
       }
-      clearPersistedState();
+      clearPersistedState().then(function (ok) {
+        if (ok) {
+          pushClientLog('Estado persistente limpiado.', 'note');
+        }
+      });
     });
 
     loadStateBtn.addEventListener('click', function () {
+      if (state.running) {
+        alert('Deten el worker antes de cargar otro estado.');
+        return;
+      }
       loadPersistedState(true);
     });
 
+    if (openCurrentBtn) {
+      openCurrentBtn.addEventListener('click', function () {
+        var url = getCurrentUrl();
+        if (!url) {
+          alert('No hay URL actual para abrir.');
+          return;
+        }
+        openUrlTopLevel(url);
+      });
+    }
+
+    if (openSigninBtn) {
+      openSigninBtn.addEventListener('click', function () {
+        openUrlTopLevel('https://earnapp.com/dashboard/signin');
+      });
+    }
+
     window.addEventListener('beforeunload', function () {
-      persistStateBeacon('beforeunload');
+      if (!state.running) {
+        persistStateBeacon('beforeunload');
+      }
     });
   }
 
@@ -608,28 +787,53 @@
     state.pending = parseAnyUrls(defaults.urls || urlsInput.value);
     state.keywords = parseAnyKeywords(defaults.keywords || keywordsInput.value);
     state.currentIndex = 0;
+    state.currentUrl = '';
     state.removed = 0;
 
-    urlsInput.value = state.pending.join('\n');
-    keywordsInput.value = state.keywords.join('\n');
     if (defaults.delay_ms) {
       delayInput.value = String(defaults.delay_ms);
     }
 
-    setControls(false);
-    setStatus('Detenido', 'status-idle');
-    setPersistText('Persistencia: cargando...', 'persist-warn');
+    syncUrlTextarea();
+    syncKeywordsTextarea();
     renderPending();
+    renderLogs();
     updateCounters();
+    setStatus('Conectando', 'status-idle');
+    setPersistText('Persistencia: cargando...', 'persist-warn');
+    setControls();
     bindEvents();
 
-    var loaded = await loadPersistedState(false);
-    if (loaded && state.pending.length > 0) {
-      log('Estado pendiente restaurado. Puedes continuar el escaneo.', 'note');
-    } else {
-      log('Listo para iniciar.', 'note');
-      queueSave('init-default');
+    try {
+      var remote = await fetchAutomationStatus();
+      if (remote.ok && remote.data && remote.data.state) {
+        applyAutomationState(remote.data.state);
+        if (state.running) {
+          pushClientLog('Worker activo detectado. Estado sincronizado.', 'note');
+        } else if (state.pending.length > 0) {
+          pushClientLog('Cola pendiente cargada desde runtime del servidor.', 'note');
+        }
+      } else {
+        var loaded = await loadPersistedState(false);
+        if (loaded) {
+          pushClientLog('Estado persistente cargado.', 'note');
+        } else {
+          pushClientLog('Listo para iniciar.', 'note');
+          queueSave('init-default');
+        }
+      }
+    } catch (error) {
+      var loadedState = await loadPersistedState(false);
+      if (loadedState) {
+        pushClientLog('Estado persistente cargado.', 'note');
+      } else {
+        pushClientLog('Listo para iniciar.', 'note');
+      }
     }
+
+    setStatusFromState();
+    setControls();
+    scheduleStatusPoll(state.running ? 1200 : 5000);
   }
 
   init();

@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 
 $urlsFile = __DIR__ . DIRECTORY_SEPARATOR . 'urls.txt';
 $keywordsFile = __DIR__ . DIRECTORY_SEPARATOR . 'keywords.txt';
@@ -77,12 +77,12 @@ if (defined('JSON_UNESCAPED_UNICODE')) {
         </div>
 
         <div class="xp-section">
-          <label for="urlsInput">URLs (una por línea). Se eliminan automáticamente cuando coinciden.</label>
+          <label for="urlsInput">URLs (una por linea). Se eliminan automaticamente cuando coinciden.</label>
           <textarea id="urlsInput" spellcheck="false"><?= htmlspecialchars($defaultUrls, ENT_QUOTES, 'UTF-8') ?></textarea>
         </div>
 
         <div class="xp-section">
-          <label for="keywordsInput">Palabras buscadas (una por línea o separadas por coma).</label>
+          <label for="keywordsInput">Palabras buscadas (una por linea o separadas por coma).</label>
           <textarea id="keywordsInput" spellcheck="false"><?= htmlspecialchars($defaultKeywords, ENT_QUOTES, 'UTF-8') ?></textarea>
         </div>
       </div>
@@ -91,17 +91,29 @@ if (defined('JSON_UNESCAPED_UNICODE')) {
     <section class="content-stack">
       <section class="xp-window">
         <div class="xp-titlebar">
-          <span>Vista de URL actual</span>
-          <span>Frame proxy local</span>
+          <span>Navegacion externa</span>
+          <span>Automatizacion con navegador real</span>
         </div>
         <div class="xp-body" style="height: 100%;">
-          <iframe id="previewFrame" class="preview-frame" title="Vista previa"></iframe>
+          <div class="external-view">
+            <p class="external-note">
+              EarnApp bloquea iframes por seguridad.\n              El worker usa un navegador real (Playwright) y puedes abrir la URL actual en una ventana nueva.
+            </p>
+            <div class="external-url-wrap">
+              <label for="currentUrlFull">URL actual de trabajo</label>
+              <input id="currentUrlFull" type="text" readonly value="-">
+            </div>
+            <div class="external-actions">
+              <button id="openCurrentBtn" type="button" class="xp-button">Abrir URL actual</button>
+              <button id="openSigninBtn" type="button" class="xp-button soft">Abrir login EarnApp</button>
+            </div>
+          </div>
         </div>
       </section>
 
       <section class="xp-window">
         <div class="xp-titlebar">
-          <span>Cola y bitácora</span>
+          <span>Cola y bitacora</span>
           <span>Seguimiento en tiempo real</span>
         </div>
         <div class="xp-body lists-grid">
@@ -110,7 +122,7 @@ if (defined('JSON_UNESCAPED_UNICODE')) {
             <ol id="pendingList" class="list-scroll"></ol>
           </div>
           <div class="list-box">
-            <h3 class="list-title">Bitácora de escaneo</h3>
+            <h3 class="list-title">Bitacora de escaneo</h3>
             <ul id="logList" class="list-scroll"></ul>
           </div>
         </div>
@@ -124,3 +136,4 @@ if (defined('JSON_UNESCAPED_UNICODE')) {
   <script src="assets/js/app.js"></script>
 </body>
 </html>
+
