@@ -49,8 +49,17 @@
     pollTimer: null,
     saveTimer: null,
     lastSavedAt: '',
-    hadStatusError: false
+    hadStatusError: false,
+    localUrlsDirty: false,
+    localKeywordsDirty: false
   };
+
+  function sanitizeUrlCandidate(value) {
+    var text = String(value || '');
+    text = text.replace(/[\u200B-\u200D\uFEFF]/g, '');
+    text = text.replace(/^[\s"'`]+|[\s"'`,;]+$/g, '');
+    return text.trim();
+  }
 
   function normalizeUrls(rawText) {
     var lines = String(rawText || '').split(/\r?\n/);
@@ -59,7 +68,7 @@
     var i;
 
     for (i = 0; i < lines.length; i += 1) {
-      var candidate = lines[i].trim();
+      var candidate = sanitizeUrlCandidate(lines[i]);
       if (!candidate) {
         continue;
       }
@@ -440,6 +449,8 @@
       }
 
       applyLoadedState(data.state);
+      state.localUrlsDirty = false;
+      state.localKeywordsDirty = false;
 
       if (data.state.updated_at) {
         markPersistOk(data.state.updated_at);
@@ -480,15 +491,20 @@
 
   function applyAutomationState(remoteState, options) {
     var opts = options || {};
+    var preserveLocalDraft = !!opts.preserveLocalDraft;
     if (!remoteState || typeof remoteState !== 'object') {
       return;
     }
 
-    if (Array.isArray(remoteState.pending_urls)) {
+    if (Array.isArray(remoteState.pending_urls) && !(preserveLocalDraft && state.localUrlsDirty)) {
       state.pending = parseAnyUrls(remoteState.pending_urls);
     }
 
-    if (Array.isArray(remoteState.keywords) && remoteState.keywords.length > 0) {
+    if (
+      Array.isArray(remoteState.keywords) &&
+      remoteState.keywords.length > 0 &&
+      !(preserveLocalDraft && state.localKeywordsDirty)
+    ) {
       state.keywords = parseAnyKeywords(remoteState.keywords);
     }
 
@@ -504,7 +520,15 @@
 
     clampCurrentIndex();
 
-    if (!opts.skipSyncInputs) {
+    if (state.running) {
+      state.localUrlsDirty = false;
+      state.localKeywordsDirty = false;
+    } else if (!preserveLocalDraft) {
+      state.localUrlsDirty = false;
+      state.localKeywordsDirty = false;
+    }
+
+    if (!opts.skipSyncInputs && !preserveLocalDraft) {
       syncUrlTextarea();
       syncKeywordsTextarea();
     }
@@ -587,7 +611,9 @@
       }
 
       state.hadStatusError = false;
-      applyAutomationState(result.data.state);
+      var remoteRunning = !!(result.data && result.data.state && result.data.state.running);
+      var preserveLocalDraft = !remoteRunning && (state.localUrlsDirty || state.localKeywordsDirty);
+      applyAutomationState(result.data.state, { preserveLocalDraft: preserveLocalDraft });
       scheduleStatusPoll(state.running ? 2000 : 5000);
     } catch (error) {
       if (!state.hadStatusError) {
@@ -616,6 +642,8 @@
     state.pending = normalizeUrls(urlsInput.value);
     state.keywords = normalizeKeywords(keywordsInput.value);
     state.currentIndex = 0;
+    state.localUrlsDirty = false;
+    state.localKeywordsDirty = false;
     clampCurrentIndex();
 
     if (state.pending.length === 0) {
@@ -696,6 +724,7 @@
       if (state.running) {
         return;
       }
+      state.localUrlsDirty = true;
       state.pending = normalizeUrls(urlsInput.value);
       clampCurrentIndex();
       syncUrlTextarea();
@@ -705,10 +734,27 @@
       queueSave('edit-urls');
     });
 
+    urlsInput.addEventListener('paste', function () {
+      if (state.running) {
+        return;
+      }
+      state.localUrlsDirty = true;
+      setTimeout(function () {
+        state.pending = normalizeUrls(urlsInput.value);
+        clampCurrentIndex();
+        syncUrlTextarea();
+        renderPending();
+        updateCounters();
+        markPersistWarn('Persistencia: URLs normalizadas (trim + sin repetidas)');
+        queueSave('paste-urls');
+      }, 0);
+    });
+
     keywordsInput.addEventListener('input', function () {
       if (state.running) {
         return;
       }
+      state.localKeywordsDirty = true;
       state.keywords = normalizeKeywords(keywordsInput.value);
       syncKeywordsTextarea();
       markPersistWarn('Persistencia: cambios pendientes');
