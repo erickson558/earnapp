@@ -348,6 +348,11 @@ async function run() {
   state.finished_at = '';
   state.stop_requested = false;
   state.removed_count = Number.isFinite(Number(state.removed_count)) ? Number(state.removed_count) : 0;
+  state.scan_count = Number.isFinite(Number(state.scan_count)) ? Number(state.scan_count) : 0;
+  state.lap_count = Number.isFinite(Number(state.lap_count)) ? Number(state.lap_count) : 1;
+  if (state.lap_count < 1) {
+    state.lap_count = 1;
+  }
   state.total_count = urls.length;
   state.keywords = keywords.slice();
   state.current_index = 0;
@@ -479,6 +484,7 @@ async function run() {
       let matchedKeyword = null;
       let statusCode = 0;
       let note = '';
+      const wasLastInQueue = pending.length > 0 && index === (pending.length - 1);
 
       try {
         const response = await page.goto(targetUrl, {
@@ -492,6 +498,8 @@ async function run() {
         const msg = error && error.message ? String(error.message) : 'Error desconocido';
         note = msg.replace(/\s+/g, ' ').slice(0, 220);
       }
+
+      state.scan_count += 1;
 
       if (matchedKeyword) {
         pending.splice(index, 1);
@@ -512,6 +520,13 @@ async function run() {
         );
         if (pending.length > 0) {
           index = (index + 1) % pending.length;
+          if (wasLastInQueue && index === 0) {
+            state.lap_count += 1;
+            stateStore.appendLog(
+              'Carrusel: inicia vuelta #' + state.lap_count + '. Pendientes: ' + pending.length + '.',
+              'note'
+            );
+          }
         }
         stateStore.setMessage('Escaneando sin coincidencia');
       }

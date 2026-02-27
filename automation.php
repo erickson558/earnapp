@@ -114,6 +114,8 @@ $bootstrapState['pending_urls'] = $urls;
 $bootstrapState['pending_count'] = count($urls);
 $bootstrapState['total_count'] = count($urls);
 $bootstrapState['message'] = 'Iniciando worker...';
+$bootstrapState['scan_count'] = 0;
+$bootstrapState['lap_count'] = 1;
 $bootstrapState['logs'] = array(
     array(
         'time' => date(DATE_ATOM),
@@ -474,6 +476,8 @@ function defaultState()
         'pending_count' => 0,
         'total_count' => 0,
         'removed_count' => 0,
+        'scan_count' => 0,
+        'lap_count' => 0,
         'keywords' => array(),
         'logs' => array(),
         'stop_requested' => false
