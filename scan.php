@@ -8,6 +8,10 @@ if ($action === 'frame') {
     renderFrame($ALLOWED_HOSTS);
     exit;
 }
+if ($action === 'proxy') {
+    proxyRequest($ALLOWED_HOSTS);
+    exit;
+}
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     sendJson(array('ok' => false, 'error' => 'Metodo no permitido'), 405);
@@ -91,7 +95,9 @@ function renderFrame($allowedHosts)
     if ($effectiveUrl === '') {
         $effectiveUrl = $safeUrl;
     }
-    echo injectBaseTag($body, $effectiveUrl);
+    $html = injectBaseTag($body, $effectiveUrl);
+    $html = injectFrameBrowserBridge($html, $effectiveUrl);
+    echo $html;
 }
 
 function validateUrl($url, $allowedHosts)
@@ -135,16 +141,38 @@ function fetchUrl($url)
         );
     }
 
+    $result = executeCurlRequest($url, true);
+
+    // Entornos viejos (PHP/OpenSSL antiguos) pueden fallar con error 60 por CA local.
+    // Si pasa eso, se hace un reintento sin verificacion SSL para mantener operativo el escaner.
+    if ((int) $result['error_no'] === 60 || isSslIssuerError($result['error'])) {
+        $fallback = executeCurlRequest($url, false);
+        if (empty($fallback['error'])) {
+            $fallback['warning'] = 'SSL verification disabled fallback';
+            return $fallback;
+        }
+        return $result;
+    }
+
+    return $result;
+}
+
+function executeCurlRequest($url, $verifySsl)
+{
     $ch = curl_init($url);
     if ($ch === false) {
         return array(
             'error' => 'No se pudo inicializar cURL.',
+            'error_no' => 0,
             'body' => '',
             'http_code' => 0,
             'effective_url' => '',
             'content_type' => ''
         );
     }
+
+    $verifyPeer = $verifySsl ? true : false;
+    $verifyHost = $verifySsl ? 2 : 0;
 
     curl_setopt_array(
         $ch,
@@ -156,15 +184,17 @@ function fetchUrl($url)
             CURLOPT_TIMEOUT => 30,
             CURLOPT_ENCODING => '',
             CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) PHP URL Scanner',
-            CURLOPT_SSL_VERIFYPEER => true,
-            CURLOPT_SSL_VERIFYHOST => 2
+            CURLOPT_SSL_VERIFYPEER => $verifyPeer,
+            CURLOPT_SSL_VERIFYHOST => $verifyHost
         )
     );
 
     $body = curl_exec($ch);
     $errorText = null;
+    $errorNo = 0;
     if ($body === false) {
         $errorText = curl_error($ch);
+        $errorNo = (int) curl_errno($ch);
         $body = '';
     }
 
@@ -175,11 +205,32 @@ function fetchUrl($url)
 
     return array(
         'error' => $errorText,
+        'error_no' => $errorNo,
         'body' => (string) $body,
         'http_code' => $httpCode,
         'effective_url' => $effectiveUrl,
         'content_type' => $contentType
     );
+}
+
+function isSslIssuerError($errorText)
+{
+    if (!is_string($errorText) || trim($errorText) === '') {
+        return false;
+    }
+
+    $msg = strtolower($errorText);
+    if (strpos($msg, 'unable to get local issuer certificate') !== false) {
+        return true;
+    }
+    if (strpos($msg, 'ssl certificate problem') !== false) {
+        return true;
+    }
+    if (strpos($msg, 'certificate verify failed') !== false) {
+        return true;
+    }
+
+    return false;
 }
 
 function findKeyword($content, $matchWords)
@@ -252,6 +303,382 @@ function injectBaseTag($html, $baseUrl)
         return $updated;
     }
     return $baseTag . $html;
+}
+
+function injectFrameBrowserBridge($html, $targetUrl)
+{
+    $escapedTargetUrl = escapeJsString((string) $targetUrl);
+    $bridgeScript = '<script>(function(){'
+        . 'var proxyPrefix="scan.php?action=proxy&u=";'
+        . 'var targetUrl="' . $escapedTargetUrl . '";'
+        . 'var targetObj=null;'
+        . 'try{targetObj=new URL(targetUrl);}catch(e){}'
+        . 'try{'
+        . 'if(targetObj){'
+        . 'var virtualPath=(targetObj.pathname||"/")+(targetObj.search||"")+(targetObj.hash||"");'
+        . 'if(virtualPath){history.replaceState({embeddedProxy:true},"",virtualPath);}'
+        . '}'
+        . '}catch(e){}'
+        . 'function toAbs(url){'
+        . 'try{return new URL(url, document.baseURI).toString();}catch(e){return null;}'
+        . '}'
+        . 'function normalizeProxyAbs(abs){'
+        . 'if(!abs){return false;}'
+        . 'try{'
+        . 'var u=new URL(abs);'
+        . 'var host=(u.host||"").toLowerCase();'
+        . 'if(host==="earnapp.com" || host==="www.earnapp.com"){return u.toString();}'
+        . 'if(targetObj && host===String(window.location.host||"").toLowerCase() && /^\\/dashboard\\//i.test(u.pathname||"")){'
+        . 'return targetObj.protocol+"//"+targetObj.host+u.pathname+(u.search||"")+(u.hash||"");'
+        . '}'
+        . '}catch(e){}'
+        . 'return null;'
+        . '}'
+        . 'function toProxy(url){'
+        . 'if(typeof url!=="string"){return url;}'
+        . 'var abs=toAbs(url);'
+        . 'var normalized=normalizeProxyAbs(abs);'
+        . 'if(!normalized){return url;}'
+        . 'return proxyPrefix + encodeURIComponent(normalized);'
+        . '}'
+        . 'if(window.fetch){'
+        . 'var nativeFetch=window.fetch;'
+        . 'window.fetch=function(resource,init){'
+        . 'try{'
+        . 'if(typeof Request!=="undefined" && resource instanceof Request){'
+        . 'resource=new Request(toProxy(resource.url),resource);'
+        . '}else if(typeof resource==="string"){'
+        . 'resource=toProxy(resource);'
+        . '}'
+        . '}catch(e){}'
+        . 'return nativeFetch.call(this,resource,init);'
+        . '};'
+        . '}'
+        . 'if(window.XMLHttpRequest && window.XMLHttpRequest.prototype){'
+        . 'var nativeOpen=window.XMLHttpRequest.prototype.open;'
+        . 'window.XMLHttpRequest.prototype.open=function(method,url){'
+        . 'try{arguments[1]=toProxy(url);}catch(e){}'
+        . 'return nativeOpen.apply(this,arguments);'
+        . '};'
+        . '}'
+        . 'if(window.EventSource){'
+        . 'var NativeEventSource=window.EventSource;'
+        . 'window.EventSource=function(url,config){'
+        . 'return new NativeEventSource(toProxy(url),config);'
+        . '};'
+        . '}'
+        . 'if(window.WebSocket){'
+        . 'var NativeWebSocket=window.WebSocket;'
+        . 'window.WebSocket=function(url,protocols){'
+        . 'var proxied=url;'
+        . 'try{proxied=toProxy(String(url));}catch(e){}'
+        . 'if(proxied!==url){'
+        . 'throw new Error("WebSocket no soportado en modo proxy embebido.");'
+        . '}'
+        . 'return new NativeWebSocket(url,protocols);'
+        . '};'
+        . '}'
+        . 'window.__earnappProxyToProxy=toProxy;'
+        . '})();</script>';
+
+    $updated = preg_replace('/<head\b[^>]*>/i', '$0' . $bridgeScript, $html, 1);
+    if (is_string($updated) && $updated !== $html) {
+        return $updated;
+    }
+    return $bridgeScript . $html;
+}
+
+function escapeJsString($value)
+{
+    $value = (string) $value;
+    $value = str_replace('\\', '\\\\', $value);
+    $value = str_replace('"', '\\"', $value);
+    $value = str_replace("\r", '\\r', $value);
+    $value = str_replace("\n", '\\n', $value);
+    return $value;
+}
+
+function proxyRequest($allowedHosts)
+{
+    $target = isset($_GET['u']) ? trim((string) $_GET['u']) : '';
+    $safeTarget = validateUrl($target, $allowedHosts);
+    if ($safeTarget === null) {
+        http_response_code(400);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'URL de proxy invalida o no permitida.';
+        return;
+    }
+
+    $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : 'GET';
+    $inputBody = (string) file_get_contents('php://input');
+    $incomingHeaders = getRequestHeadersSafe();
+    $cookieHeader = getProxyCookieHeader($safeTarget);
+
+    $forwardHeaders = array();
+    foreach ($incomingHeaders as $headerName => $headerValue) {
+        $nameLower = strtolower($headerName);
+        if ($nameLower === 'host') {
+            continue;
+        }
+        if ($nameLower === 'content-length') {
+            continue;
+        }
+        if ($nameLower === 'cookie') {
+            continue;
+        }
+        if ($nameLower === 'referer' || $nameLower === 'origin') {
+            continue;
+        }
+        $forwardHeaders[] = $headerName . ': ' . $headerValue;
+    }
+    if ($cookieHeader !== '') {
+        $forwardHeaders[] = 'Cookie: ' . $cookieHeader;
+    }
+    if (!hasHeader($forwardHeaders, 'User-Agent')) {
+        $forwardHeaders[] = 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Embedded Proxy Scanner';
+    }
+    if (!hasHeader($forwardHeaders, 'Accept')) {
+        $forwardHeaders[] = 'Accept: */*';
+    }
+
+    $responseHeaders = array();
+    $ch = curl_init($safeTarget);
+    if ($ch === false) {
+        http_response_code(500);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'No se pudo inicializar proxy.';
+        return;
+    }
+
+    curl_setopt_array(
+        $ch,
+        array(
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 8,
+            CURLOPT_CONNECTTIMEOUT => 20,
+            CURLOPT_TIMEOUT => 45,
+            CURLOPT_ENCODING => '',
+            CURLOPT_HTTPHEADER => $forwardHeaders,
+            CURLOPT_HEADERFUNCTION => function ($ch, $line) use (&$responseHeaders) {
+                $len = strlen($line);
+                $trimmed = trim($line);
+                if ($trimmed !== '') {
+                    $responseHeaders[] = $trimmed;
+                }
+                return $len;
+            }
+        )
+    );
+
+    if ($method === 'POST') {
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $inputBody);
+    } elseif ($method !== 'GET' && $method !== 'HEAD') {
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+        if ($inputBody !== '') {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $inputBody);
+        }
+    } elseif ($method === 'HEAD') {
+        curl_setopt($ch, CURLOPT_NOBODY, true);
+    }
+
+    $body = curl_exec($ch);
+    $errorText = null;
+    $errorNo = 0;
+    if ($body === false) {
+        $errorText = curl_error($ch);
+        $errorNo = (int) curl_errno($ch);
+        $body = '';
+    }
+
+    if ($errorNo === 60 || isSslIssuerError($errorText)) {
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+        $responseHeaders = array();
+        $body = curl_exec($ch);
+        if ($body === false) {
+            $errorText = curl_error($ch);
+            $errorNo = (int) curl_errno($ch);
+            $body = '';
+        } else {
+            $errorText = null;
+            $errorNo = 0;
+        }
+    }
+
+    $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $contentType = (string) curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+    $effectiveUrl = (string) curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+    curl_close($ch);
+
+    if ($errorText !== null) {
+        http_response_code(502);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'Proxy error: ' . $errorText;
+        return;
+    }
+
+    storeProxyCookiesFromHeaders($responseHeaders, $effectiveUrl !== '' ? $effectiveUrl : $safeTarget);
+
+    if ($statusCode > 0) {
+        http_response_code($statusCode);
+    }
+    if ($contentType !== '') {
+        header('Content-Type: ' . $contentType);
+    }
+
+    emitSafeProxyHeaders($responseHeaders);
+    echo (string) $body;
+}
+
+function emitSafeProxyHeaders($responseHeaders)
+{
+    foreach ($responseHeaders as $headerLine) {
+        $parts = explode(':', $headerLine, 2);
+        if (count($parts) < 2) {
+            continue;
+        }
+        $name = trim($parts[0]);
+        $value = trim($parts[1]);
+        if ($name === '') {
+            continue;
+        }
+
+        $nameLower = strtolower($name);
+        if ($nameLower === 'content-length') {
+            continue;
+        }
+        if ($nameLower === 'transfer-encoding') {
+            continue;
+        }
+        if ($nameLower === 'connection') {
+            continue;
+        }
+        if ($nameLower === 'content-encoding') {
+            continue;
+        }
+        if ($nameLower === 'set-cookie') {
+            continue;
+        }
+        if ($nameLower === 'x-frame-options') {
+            continue;
+        }
+        if ($nameLower === 'content-security-policy') {
+            continue;
+        }
+        if ($nameLower === 'strict-transport-security') {
+            continue;
+        }
+        if ($nameLower === 'cf-ray' || $nameLower === 'cf-cache-status' || $nameLower === 'server' || $nameLower === 'alt-svc') {
+            continue;
+        }
+
+        header($name . ': ' . $value, false);
+    }
+}
+
+function getRequestHeadersSafe()
+{
+    if (function_exists('getallheaders')) {
+        $headers = getallheaders();
+        if (is_array($headers)) {
+            return $headers;
+        }
+    }
+
+    $out = array();
+    foreach ($_SERVER as $key => $value) {
+        if (strpos($key, 'HTTP_') !== 0) {
+            continue;
+        }
+        $name = str_replace('_', '-', substr($key, 5));
+        $name = ucwords(strtolower($name), '-');
+        $out[$name] = (string) $value;
+    }
+    return $out;
+}
+
+function hasHeader($headerLines, $headerName)
+{
+    $needle = strtolower($headerName . ':');
+    foreach ($headerLines as $line) {
+        if (strpos(strtolower($line), $needle) === 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function getProxyCookieHeader($url)
+{
+    $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+    if ($host === '') {
+        return '';
+    }
+
+    if (session_id() === '') {
+        @session_start();
+    }
+
+    if (!isset($_SESSION['proxy_cookie_jar']) || !is_array($_SESSION['proxy_cookie_jar'])) {
+        return '';
+    }
+
+    if (!isset($_SESSION['proxy_cookie_jar'][$host]) || !is_array($_SESSION['proxy_cookie_jar'][$host])) {
+        return '';
+    }
+
+    $pairs = array();
+    foreach ($_SESSION['proxy_cookie_jar'][$host] as $name => $value) {
+        $pairs[] = $name . '=' . $value;
+    }
+    return implode('; ', $pairs);
+}
+
+function storeProxyCookiesFromHeaders($responseHeaders, $url)
+{
+    $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+    if ($host === '') {
+        return;
+    }
+
+    if (session_id() === '') {
+        @session_start();
+    }
+
+    if (!isset($_SESSION['proxy_cookie_jar']) || !is_array($_SESSION['proxy_cookie_jar'])) {
+        $_SESSION['proxy_cookie_jar'] = array();
+    }
+    if (!isset($_SESSION['proxy_cookie_jar'][$host]) || !is_array($_SESSION['proxy_cookie_jar'][$host])) {
+        $_SESSION['proxy_cookie_jar'][$host] = array();
+    }
+
+    foreach ($responseHeaders as $line) {
+        if (stripos($line, 'Set-Cookie:') !== 0) {
+            continue;
+        }
+        $cookiePart = trim(substr($line, strlen('Set-Cookie:')));
+        if ($cookiePart === '') {
+            continue;
+        }
+        $cookiePair = explode(';', $cookiePart, 2);
+        $nameValue = trim($cookiePair[0]);
+        if (strpos($nameValue, '=') === false) {
+            continue;
+        }
+        $nameValueParts = explode('=', $nameValue, 2);
+        $cookieName = trim($nameValueParts[0]);
+        $cookieValue = trim($nameValueParts[1]);
+        if ($cookieName === '') {
+            continue;
+        }
+        if ($cookieValue === '') {
+            unset($_SESSION['proxy_cookie_jar'][$host][$cookieName]);
+            continue;
+        }
+        $_SESSION['proxy_cookie_jar'][$host][$cookieName] = $cookieValue;
+    }
 }
 
 function outputErrorHtml($message)
