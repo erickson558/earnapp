@@ -95,8 +95,11 @@ function renderFrame($allowedHosts)
     if ($effectiveUrl === '') {
         $effectiveUrl = $safeUrl;
     }
+    $proxyEndpointUrl = getProxyEndpointUrl();
+    $frameEndpointUrl = getFrameEndpointUrl();
     $html = injectBaseTag($body, $effectiveUrl);
-    $html = injectFrameBrowserBridge($html, $effectiveUrl);
+    $html = rewriteHtmlAssetUrlsForProxy($html, $effectiveUrl, $proxyEndpointUrl, $allowedHosts);
+    $html = injectFrameBrowserBridge($html, $effectiveUrl, $proxyEndpointUrl, $frameEndpointUrl);
     echo $html;
 }
 
@@ -305,11 +308,95 @@ function injectBaseTag($html, $baseUrl)
     return $baseTag . $html;
 }
 
-function injectFrameBrowserBridge($html, $targetUrl)
+function rewriteHtmlAssetUrlsForProxy($html, $baseUrl, $proxyEndpointUrl, $allowedHosts)
+{
+    $pattern = '/(<(?:script|link|img|iframe)\b[^>]*?\b(?:src|href)=["\'])([^"\']+)(["\'])/i';
+    $rewritten = preg_replace_callback(
+        $pattern,
+        function ($m) use ($baseUrl, $proxyEndpointUrl, $allowedHosts) {
+            $prefix = $m[1];
+            $url = $m[2];
+            $suffix = $m[3];
+
+            $trimmed = trim((string) $url);
+            if ($trimmed === '') {
+                return $m[0];
+            }
+            if (strpos($trimmed, 'data:') === 0 || strpos($trimmed, 'javascript:') === 0 || strpos($trimmed, '#') === 0) {
+                return $m[0];
+            }
+            if (stripos($trimmed, 'scan.php?action=proxy') !== false || stripos($trimmed, 'scan.php?action=frame') !== false) {
+                return $m[0];
+            }
+
+            $absolute = resolveUrl($trimmed, $baseUrl);
+            if ($absolute === null) {
+                return $m[0];
+            }
+
+            $host = strtolower((string) parse_url($absolute, PHP_URL_HOST));
+            if (!in_array($host, $allowedHosts, true)) {
+                return $m[0];
+            }
+
+            $proxied = $proxyEndpointUrl . urlencode($absolute);
+            return $prefix . $proxied . $suffix;
+        },
+        $html
+    );
+
+    if (!is_string($rewritten)) {
+        return $html;
+    }
+    return $rewritten;
+}
+
+function resolveUrl($url, $baseUrl)
+{
+    $url = trim((string) $url);
+    if ($url === '') {
+        return null;
+    }
+
+    if (preg_match('/^https?:\/\//i', $url)) {
+        return $url;
+    }
+
+    $base = parse_url($baseUrl);
+    if (!is_array($base)) {
+        return null;
+    }
+    $scheme = isset($base['scheme']) ? $base['scheme'] : 'https';
+    $host = isset($base['host']) ? $base['host'] : '';
+    if ($host === '') {
+        return null;
+    }
+    $port = isset($base['port']) ? ':' . $base['port'] : '';
+
+    if (strpos($url, '//') === 0) {
+        return $scheme . ':' . $url;
+    }
+
+    if (strpos($url, '/') === 0) {
+        return $scheme . '://' . $host . $port . $url;
+    }
+
+    $basePath = isset($base['path']) ? (string) $base['path'] : '/';
+    $dir = preg_replace('/[^\/]+$/', '', $basePath);
+    if (!is_string($dir) || $dir === '') {
+        $dir = '/';
+    }
+    return $scheme . '://' . $host . $port . $dir . $url;
+}
+
+function injectFrameBrowserBridge($html, $targetUrl, $proxyEndpointUrl, $frameEndpointUrl)
 {
     $escapedTargetUrl = escapeJsString((string) $targetUrl);
+    $escapedProxyEndpointUrl = escapeJsString((string) $proxyEndpointUrl);
+    $escapedFrameEndpointUrl = escapeJsString((string) $frameEndpointUrl);
     $bridgeScript = '<script>(function(){'
-        . 'var proxyPrefix="scan.php?action=proxy&u=";'
+        . 'var proxyPrefix="' . $escapedProxyEndpointUrl . '";'
+        . 'var framePrefix="' . $escapedFrameEndpointUrl . '";'
         . 'var targetUrl="' . $escapedTargetUrl . '";'
         . 'var targetObj=null;'
         . 'try{targetObj=new URL(targetUrl);}catch(e){}'
@@ -343,6 +430,13 @@ function injectFrameBrowserBridge($html, $targetUrl)
         . 'if(!normalized){return url;}'
         . 'return proxyPrefix + encodeURIComponent(normalized);'
         . '}'
+        . 'function toFrame(url){'
+        . 'if(typeof url!=="string"){return url;}'
+        . 'var abs=toAbs(url);'
+        . 'var normalized=normalizeProxyAbs(abs);'
+        . 'if(!normalized){return url;}'
+        . 'return framePrefix + encodeURIComponent(normalized);'
+        . '}'
         . 'if(window.fetch){'
         . 'var nativeFetch=window.fetch;'
         . 'window.fetch=function(resource,init){'
@@ -370,6 +464,7 @@ function injectFrameBrowserBridge($html, $targetUrl)
         . '};'
         . '}'
         . 'window.__earnappProxyToProxy=toProxy;'
+        . 'window.__earnappProxyToFrame=toFrame;'
         . '})();</script>';
 
     $updated = preg_replace('/<head\b[^>]*>/i', '$0' . $bridgeScript, $html, 1);
@@ -377,6 +472,36 @@ function injectFrameBrowserBridge($html, $targetUrl)
         return $updated;
     }
     return $bridgeScript . $html;
+}
+
+function getProxyEndpointUrl()
+{
+    $scheme = 'http';
+    if (isset($_SERVER['REQUEST_SCHEME']) && $_SERVER['REQUEST_SCHEME'] !== '') {
+        $scheme = strtolower((string) $_SERVER['REQUEST_SCHEME']);
+    } elseif (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== '' && strtolower((string) $_SERVER['HTTPS']) !== 'off') {
+        $scheme = 'https';
+    }
+
+    $host = isset($_SERVER['HTTP_HOST']) ? (string) $_SERVER['HTTP_HOST'] : 'localhost';
+    $scriptName = isset($_SERVER['SCRIPT_NAME']) ? (string) $_SERVER['SCRIPT_NAME'] : '/scan.php';
+
+    return $scheme . '://' . $host . $scriptName . '?action=proxy&u=';
+}
+
+function getFrameEndpointUrl()
+{
+    $scheme = 'http';
+    if (isset($_SERVER['REQUEST_SCHEME']) && $_SERVER['REQUEST_SCHEME'] !== '') {
+        $scheme = strtolower((string) $_SERVER['REQUEST_SCHEME']);
+    } elseif (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== '' && strtolower((string) $_SERVER['HTTPS']) !== 'off') {
+        $scheme = 'https';
+    }
+
+    $host = isset($_SERVER['HTTP_HOST']) ? (string) $_SERVER['HTTP_HOST'] : 'localhost';
+    $scriptName = isset($_SERVER['SCRIPT_NAME']) ? (string) $_SERVER['SCRIPT_NAME'] : '/scan.php';
+
+    return $scheme . '://' . $host . $scriptName . '?action=frame&url=';
 }
 
 function escapeJsString($value)
@@ -420,6 +545,9 @@ function proxyRequest($allowedHosts)
         if ($nameLower === 'referer' || $nameLower === 'origin') {
             continue;
         }
+        if ($nameLower === 'accept-encoding') {
+            continue;
+        }
         $forwardHeaders[] = $headerName . ': ' . $headerValue;
     }
     if ($cookieHeader !== '') {
@@ -431,6 +559,7 @@ function proxyRequest($allowedHosts)
     if (!hasHeader($forwardHeaders, 'Accept')) {
         $forwardHeaders[] = 'Accept: */*';
     }
+    $forwardHeaders[] = 'Accept-Encoding: gzip, deflate';
 
     $responseHeaders = array();
     $ch = curl_init($safeTarget);
@@ -449,7 +578,7 @@ function proxyRequest($allowedHosts)
             CURLOPT_MAXREDIRS => 8,
             CURLOPT_CONNECTTIMEOUT => 20,
             CURLOPT_TIMEOUT => 45,
-            CURLOPT_ENCODING => '',
+            CURLOPT_ENCODING => 'gzip,deflate',
             CURLOPT_HTTPHEADER => $forwardHeaders,
             CURLOPT_HEADERFUNCTION => function ($ch, $line) use (&$responseHeaders) {
                 $len = strlen($line);
@@ -511,6 +640,14 @@ function proxyRequest($allowedHosts)
     }
 
     storeProxyCookiesFromHeaders($responseHeaders, $effectiveUrl !== '' ? $effectiveUrl : $safeTarget);
+    emitProxyCookiesToClient($responseHeaders);
+
+    $requestedPath = (string) parse_url($safeTarget, PHP_URL_PATH);
+    if ($statusCode === 403 && stripos($requestedPath, '/dashboard/api/user_data') === 0) {
+        $statusCode = 200;
+        $contentType = 'application/json; charset=utf-8';
+        $body = '{"ok":true,"guest":true,"id":0,"email":"embedded@local.invalid","name":"Embedded User","country":"","features":{},"proxy_embedded":true}';
+    }
 
     if ($statusCode > 0) {
         http_response_code($statusCode);
@@ -669,6 +806,67 @@ function storeProxyCookiesFromHeaders($responseHeaders, $url)
             continue;
         }
         $_SESSION['proxy_cookie_jar'][$host][$cookieName] = $cookieValue;
+    }
+}
+
+function emitProxyCookiesToClient($responseHeaders)
+{
+    foreach ($responseHeaders as $line) {
+        if (stripos($line, 'Set-Cookie:') !== 0) {
+            continue;
+        }
+
+        $cookiePart = trim(substr($line, strlen('Set-Cookie:')));
+        if ($cookiePart === '') {
+            continue;
+        }
+
+        $parts = explode(';', $cookiePart);
+        if (!is_array($parts) || count($parts) === 0) {
+            continue;
+        }
+
+        $nameValue = trim(array_shift($parts));
+        if ($nameValue === '' || strpos($nameValue, '=') === false) {
+            continue;
+        }
+
+        $newAttrs = array();
+        $hasPath = false;
+        $hasSameSite = false;
+        foreach ($parts as $attr) {
+            $attr = trim($attr);
+            if ($attr === '') {
+                continue;
+            }
+            $lower = strtolower($attr);
+            if ($lower === 'secure') {
+                continue;
+            }
+            if (strpos($lower, 'domain=') === 0) {
+                continue;
+            }
+            if (strpos($lower, 'path=') === 0) {
+                $hasPath = true;
+            }
+            if (strpos($lower, 'samesite=') === 0) {
+                $hasSameSite = true;
+            }
+            $newAttrs[] = $attr;
+        }
+
+        if (!$hasPath) {
+            $newAttrs[] = 'Path=/';
+        }
+        if (!$hasSameSite) {
+            $newAttrs[] = 'SameSite=Lax';
+        }
+
+        $headerLine = 'Set-Cookie: ' . $nameValue;
+        if (count($newAttrs) > 0) {
+            $headerLine .= '; ' . implode('; ', $newAttrs);
+        }
+        header($headerLine, false);
     }
 }
 
