@@ -294,11 +294,48 @@ function findKeyword(haystack, keywords) {
   const lowered = String(haystack).toLowerCase();
   for (let i = 0; i < keywords.length; i += 1) {
     const keyword = keywords[i];
+    const variants = expandKeywordVariants(keyword);
+    for (let j = 0; j < variants.length; j += 1) {
+      if (lowered.indexOf(variants[j]) !== -1) {
+        return keyword;
+      }
+    }
     if (lowered.indexOf(String(keyword).toLowerCase()) !== -1) {
       return keyword;
     }
   }
   return null;
+}
+
+function expandKeywordVariants(keyword) {
+  const out = [];
+  const seen = Object.create(null);
+
+  function add(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (!normalized || seen[normalized]) {
+      return;
+    }
+    seen[normalized] = true;
+    out.push(normalized);
+  }
+
+  const base = String(keyword || '').trim();
+  const lower = base.toLowerCase();
+
+  add(base);
+  add(base.replace(/sucess/g, 'success'));
+  add(base.replace(/successfull/g, 'successful'));
+
+  if (lower.indexOf('success') !== -1 || lower.indexOf('sucess') !== -1) {
+    add('success');
+    add('successful');
+    add('successfully');
+    add('successfull');
+    add('sucessfull');
+  }
+
+  return out;
 }
 
 async function run() {
