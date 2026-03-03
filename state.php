@@ -1,7 +1,7 @@
 <?php
 
 $STATE_FILE = __DIR__ . DIRECTORY_SEPARATOR . 'scanner_state.json';
-$DEFAULT_KEYWORDS = array('Sucessfull', 'Successful', 'Already');
+$DEFAULT_KEYWORDS = array('Device successfully linked', 'Successful', 'Successfully', 'Already');
 
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     $state = loadState($STATE_FILE, $DEFAULT_KEYWORDS);

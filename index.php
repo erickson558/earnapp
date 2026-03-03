@@ -2,10 +2,19 @@
 
 $urlsFile = __DIR__ . DIRECTORY_SEPARATOR . 'urls.txt';
 $keywordsFile = __DIR__ . DIRECTORY_SEPARATOR . 'keywords.txt';
+$versionFile = __DIR__ . DIRECTORY_SEPARATOR . 'VERSION';
 
 $defaultUrls = '';
-$defaultKeywords = "Sucessfull\nSuccessful\nAlready";
+$defaultKeywords = "Device successfully linked\nSuccessful\nSuccessfully\nAlready";
 $defaultDelay = 3500;
+$appVersion = '1.0.1';
+
+if (is_file($versionFile) && is_readable($versionFile)) {
+  $rawVersion = trim((string) file_get_contents($versionFile));
+  if ($rawVersion !== '') {
+    $appVersion = $rawVersion;
+  }
+}
 
 if (is_file($urlsFile) && is_readable($urlsFile)) {
     $defaultUrls = trim((string) file_get_contents($urlsFile));
@@ -21,7 +30,8 @@ if (is_file($keywordsFile) && is_readable($keywordsFile)) {
 $bootstrap = array(
     'urls' => $defaultUrls,
     'keywords' => $defaultKeywords,
-    'delay_ms' => $defaultDelay
+  'delay_ms' => $defaultDelay,
+  'version' => $appVersion
 );
 
 $jsonOptions = 0;
@@ -44,7 +54,7 @@ if (defined('JSON_UNESCAPED_UNICODE')) {
   <main class="xp-shell">
     <section class="xp-window">
       <div class="xp-titlebar">
-        <span>EarnApp Scanner Control Center</span>
+        <span>EarnApp Scanner Control Center v<?= htmlspecialchars($appVersion, ENT_QUOTES, 'UTF-8') ?></span>
         <span id="statusText" class="status-idle">Detenido</span>
       </div>
       <div class="xp-body">

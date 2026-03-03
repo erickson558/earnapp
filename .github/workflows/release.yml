@@ -1,0 +1,58 @@
+name: Release on Main
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Validate and read version
+        id: version
+        shell: bash
+        run: |
+          VERSION_FILE="$(tr -d '[:space:]' < VERSION)"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+
+          if [[ -z "$VERSION_FILE" ]]; then
+            echo "VERSION file is empty" >&2
+            exit 1
+          fi
+
+          if [[ "$VERSION_FILE" != "$PACKAGE_VERSION" ]]; then
+            echo "Version mismatch: VERSION=$VERSION_FILE package.json=$PACKAGE_VERSION" >&2
+            exit 1
+          fi
+
+          TAG="V$VERSION_FILE"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag already exists: $TAG. Bump version before pushing to main." >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION_FILE" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true

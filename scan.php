@@ -1,7 +1,7 @@
 <?php
 
 $ALLOWED_HOSTS = array('earnapp.com', 'www.earnapp.com');
-$DEFAULT_MATCH_WORDS = array('Sucessfull', 'Successful', 'Already');
+$DEFAULT_MATCH_WORDS = array('Device successfully linked', 'Successful', 'Successfully', 'Already');
 
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 if ($action === 'frame') {
@@ -239,11 +239,49 @@ function isSslIssuerError($errorText)
 function findKeyword($content, $matchWords)
 {
     foreach ($matchWords as $word) {
+        $variants = expandKeywordVariants($word);
+        foreach ($variants as $variant) {
+            if ($variant !== '' && stripos($content, $variant) !== false) {
+                return $word;
+            }
+        }
         if (stripos($content, $word) !== false) {
             return $word;
         }
     }
     return null;
+}
+
+function expandKeywordVariants($word)
+{
+    $out = array();
+    $add = function ($value) use (&$out) {
+        $text = trim((string) $value);
+        if ($text === '') {
+            return;
+        }
+        $key = strtolower($text);
+        $out[$key] = $text;
+    };
+
+    $base = trim((string) $word);
+    $lower = strtolower($base);
+
+    $add($base);
+    $add(str_replace('sucess', 'success', $base));
+    $add(str_replace('Sucess', 'Success', $base));
+    $add(str_replace('successfull', 'successful', $base));
+    $add(str_replace('Successfull', 'Successful', $base));
+
+    if (strpos($lower, 'success') !== false) {
+        $add('success');
+        $add('successful');
+        $add('successfully');
+        $add('successfull');
+        $add('sucessfull');
+    }
+
+    return array_values($out);
 }
 
 function resolveKeywords($payload, $defaultWords)
